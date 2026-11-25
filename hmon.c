@@ -64,6 +64,8 @@ static int get_total_net_stats(struct net_stats *);
 static int get_disk_stats(struct disk_stats *, int);
 static int get_uptime_stats(float *);
 
+static uint64_t calc_net_speed(uint64_t, uint64_t, uint64_t);
+
 static void calc_cpu_usage(struct cpu_stats *, struct cpu_stats *);
 static void calc_memory_usage(struct memory_stats *);
 static void calc_disks_usage(struct disk_stats *, int);
@@ -100,9 +102,8 @@ main(void)
 
 		get_total_net_stats(&net_stats);
 
-		// Calculate network speed
-		rx_speed = net_stats.rx_bytes > prev_net_stats.rx_bytes ? (net_stats.rx_bytes - prev_net_stats.rx_bytes) / TIME_INTERVAL_SEC : 0;
-		tx_speed = net_stats.tx_bytes > prev_net_stats.tx_bytes ? (net_stats.tx_bytes - prev_net_stats.tx_bytes) / TIME_INTERVAL_SEC : 0;
+		rx_speed = calc_net_speed(prev_net_stats.rx_bytes, net_stats.rx_bytes, TIME_INTERVAL_SEC);
+		tx_speed = calc_net_speed(prev_net_stats.tx_bytes, net_stats.tx_bytes, TIME_INTERVAL_SEC);
 		prev_net_stats = net_stats;
 
 		n_disks = get_disk_stats(disks, DISKS_MAX);
@@ -118,7 +119,7 @@ main(void)
 #endif
 
 		// Print results to stdout
-		printf("Network: receive = %lu bytes/sec, transmit = %lu bytes/sec\n", rx_speed, tx_speed);
+		printf("Network: receive = %lu B/s, transmit = %lu B/s\n", rx_speed, tx_speed);
 #if 0
 		print_stats(&cpu_stats, &memory_stats, uptime, disks,
 			    n_disks);
@@ -210,7 +211,7 @@ get_memory_stats(struct memory_stats *stats)
 }
 
 /*
- * Read /proc/net/dev and calculate total bytes received/transmitted
+ * Read /proc/net/dev and accumulate total bytes received/transmitted
  * over all physical interfaces.
  *
  * Return 0 on success, or -1 if /proc/net/dev cannot be read.
@@ -428,4 +429,15 @@ print_stats(const struct cpu_stats *cpu_stats, const struct memory_stats *memory
 	for (i = 0; i < n_disks; ++i)
 		printf("\t%.2f|%.2f\t%s\n", disks[i].used_pct,
 		       disks[i].inodes_used_pct, disks[i].mnt);
+}
+
+/*
+ * Calculate network speed by formula
+ *
+ * s = (n2 - n1) / t
+ */
+static uint64_t
+calc_net_speed(uint64_t n1, uint64_t n2, uint64_t t)
+{
+	return n2 > n1 ? (n2 - n1) / t : 0;
 }
