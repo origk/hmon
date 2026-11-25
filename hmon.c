@@ -37,13 +37,9 @@ struct memory_stats {
 	float swap_pct; // Swap usage in percents
 };
 
-struct network_stats {
-	uint64_t rx;
-	uint64_t tx;
-	uint64_t timestamp; // Point in time when stats were obtained
-
-	uint64_t speed_rx; // Receive speed in bytes/sec
-	uint64_t speed_tx; // Transmit speed in bytes/sec
+struct net_stats {
+	uint64_t rx_bytes; // Total bytes received
+	uint64_t tx_bytes; // Total bytes transmitted
 };
 
 #define DISKS_MAX 32
@@ -64,17 +60,16 @@ static uint64_t get_time_sec(void);
 
 static int get_cpu_stats(struct cpu_stats *);
 static int get_memory_stats(struct memory_stats *);
-static int get_network_stats(struct network_stats *);
+static int get_total_net_stats(struct net_stats *);
 static int get_disk_stats(struct disk_stats *, int);
 static int get_uptime_stats(float *);
 
 static void calc_cpu_usage(struct cpu_stats *, struct cpu_stats *);
 static void calc_memory_usage(struct memory_stats *);
-static void calc_network_usage(struct network_stats *, struct network_stats *);
 static void calc_disks_usage(struct disk_stats *, int);
 
 static void print_stats(const struct cpu_stats *, const struct memory_stats *,
-			const struct network_stats *, float, const struct disk_stats *,
+			float, const struct disk_stats *,
 			int);
 
 #define timespec_diff(t1, t2) (((double)(t1).tv_sec + (t1).tv_nsec * 1e-9) - \
@@ -85,50 +80,60 @@ main(void)
 {
 	struct cpu_stats cpu_stats, prev_cpu_stats;
 	struct memory_stats memory_stats;
-	struct network_stats network_stats, prev_network_stats;
+	struct net_stats net_stats, prev_net_stats;
 	struct disk_stats disks[DISKS_MAX];
+	uint64_t rx_speed, tx_speed;
 	int n_disks;
 	float uptime;
 #if 0
 	struct timespec t1, t2;
-#endif	
+#endif
 	// Initialize the previous stats.
 	get_cpu_stats(&prev_cpu_stats);
-	get_network_stats(&prev_network_stats);
-	
+
 	for (;;) {
 #if 0
 		clock_gettime(CLOCK_MONOTONIC, &t1);
-#endif		
+#endif
 		get_cpu_stats(&cpu_stats);
 		get_memory_stats(&memory_stats);
-		get_network_stats(&network_stats);
+
+		get_total_net_stats(&net_stats);
+
+		// Calculate network speed
+		rx_speed = net_stats.rx_bytes > prev_net_stats.rx_bytes ? (net_stats.rx_bytes - prev_net_stats.rx_bytes) / TIME_INTERVAL_SEC : 0;
+		tx_speed = net_stats.tx_bytes > prev_net_stats.tx_bytes ? (net_stats.tx_bytes - prev_net_stats.tx_bytes) / TIME_INTERVAL_SEC : 0;
+		prev_net_stats = net_stats;
+
 		n_disks = get_disk_stats(disks, DISKS_MAX);
 		get_uptime_stats(&uptime);
 
 		calc_cpu_usage(&cpu_stats, &prev_cpu_stats);
 		calc_memory_usage(&memory_stats);
-		calc_network_usage(&network_stats, &prev_network_stats);
 		calc_disks_usage(disks, n_disks);
 
 #if 0
 		clock_gettime(CLOCK_MONOTONIC, &t2);
 		printf("Exec time: %g\n", timespec_diff(t2, t1));
 #endif
-		print_stats(&cpu_stats, &memory_stats, &network_stats, uptime, disks,
+
+		// Print results to stdout
+		printf("Network: receive = %lu bytes/sec, transmit = %lu bytes/sec\n", rx_speed, tx_speed);
+#if 0
+		print_stats(&cpu_stats, &memory_stats, uptime, disks,
 			    n_disks);
-		
+#endif
 		usleep(TIME_INTERVAL_SEC * 1000000);
 	}
-	
+
 	return EXIT_SUCCESS;
 }
 
-static uint64_t
+[[maybe_unused]] static uint64_t
 get_time_sec(void)
 {
 	struct timespec t;
-	
+
 	if (clock_gettime(CLOCK_MONOTONIC, &t) == -1)
 		return 0;
 	return t.tv_sec;
@@ -144,7 +149,7 @@ static int
 get_cpu_stats(struct cpu_stats *stats)
 {
 	FILE *fp;
-	
+
 	memset(stats, 0, sizeof(*stats));
 
 	if (!(fp = fopen("/proc/stat", "r")))
@@ -172,7 +177,7 @@ get_memory_stats(struct memory_stats *stats)
 {
 	char line[512];
 	FILE *fp;
-	
+
 	memset(stats, 0, sizeof(*stats));
 
 	if (!(fp = fopen("/proc/meminfo", "r")))
@@ -199,25 +204,25 @@ get_memory_stats(struct memory_stats *stats)
 		fclose(fp);
 		return -1;
 	}
-	
+
 	fclose(fp);
 	return 0;
 }
 
 /*
- * Get network stats from /proc/net/dev.  Accumulate data over all physical
- * interfaces.
+ * Read /proc/net/dev and calculate total bytes received/transmitted
+ * over all physical interfaces.
  *
- * On error return -1.
+ * Return 0 on success, or -1 if /proc/net/dev cannot be read.
  */
 static int
-get_network_stats(struct network_stats *stats)
+get_total_net_stats(struct net_stats *stats)
 {
 	char line[256], path[256 + 32];
 	FILE *fp;
 	char *colon, *iface;
 	uint64_t rx, tx;
-	
+
 	memset(stats, 0, sizeof(*stats));
 
 	if (!(fp = fopen("/proc/net/dev", "r")))
@@ -229,6 +234,7 @@ get_network_stats(struct network_stats *stats)
 
 		*colon = '\0';
 
+		// Interface name: skip leading spaces.
 		iface = line;
 		while (*iface == ' ')
 			++iface;
@@ -238,21 +244,14 @@ get_network_stats(struct network_stats *stats)
 		if (access(path, F_OK) == -1)
 			continue;
 
-		if (sscanf(colon + 1, "%lu %*u %*u %*u %*u %*u %*u %*u %lu",
-			   &rx, &tx) != 2)
+		// Parse only received/transmitted counters, ignore everything else.
+		if (sscanf(colon + 1, "%lu %*u %*u %*u %*u %*u %*u %*u %lu", &rx, &tx) != 2)
 			continue;
 
-		stats->rx += rx;
-		stats->tx += tx;
+		stats->rx_bytes += rx;
+		stats->tx_bytes += tx;
 	}
 
-	if (ferror(fp)) {
-		fclose(fp);
-		return -1;
-	}
-
-	stats->timestamp = get_time_sec();
-	
 	fclose(fp);
 	return 0;
 }
@@ -269,7 +268,7 @@ get_disk_stats(struct disk_stats *disks, int disks_max)
 	struct statvfs vfs;
 	FILE *fp;
 	int count = 0;
-	
+
 	memset(disks, 0, sizeof(*disks) * disks_max);
 
 	if (!(fp = fopen("/proc/mounts", "r")))
@@ -292,7 +291,7 @@ get_disk_stats(struct disk_stats *disks, int disks_max)
 		disks[count].available = vfs.f_bavail * vfs.f_frsize;
 		disks[count].inodes = vfs.f_files;
 		disks[count].inodes_free = vfs.f_ffree;
-		
+
 		++count;
 	}
 
@@ -300,7 +299,7 @@ get_disk_stats(struct disk_stats *disks, int disks_max)
 		fclose(fp);
 		return -1;
 	}
-	
+
 	fclose(fp);
 	return count;
 }
@@ -314,7 +313,7 @@ static int
 get_uptime_stats(float *uptime)
 {
 	FILE *fp;
-	
+
 	*uptime = 0;
 
 	if (!(fp = fopen("/proc/uptime", "r")))
@@ -324,7 +323,7 @@ get_uptime_stats(float *uptime)
 		fclose(fp);
 		return -1;
 	}
-	
+
 	fclose(fp);
 	return 0;
 }
@@ -351,7 +350,7 @@ calc_cpu_usage(struct cpu_stats *stats, struct cpu_stats *prev_stats)
 
 	total = busy + idle;
 	prev_total = prev_busy + prev_idle;
-	
+
 	total_delta = total > prev_total ? total - prev_total : 0;
 	idle_delta = idle > prev_idle ? idle - prev_idle : 0;
 
@@ -385,27 +384,6 @@ calc_memory_usage(struct memory_stats *stats)
 }
 
 /*
- * Calculate network receive/transmit speed.
- */
-static void
-calc_network_usage(struct network_stats *stats, struct network_stats *prev_stats)
-{
-	uint64_t t;
-	
-	stats->speed_rx = stats->speed_tx = 0;
-
-	if (stats->timestamp > prev_stats->timestamp) {
-		t = stats->timestamp - prev_stats->timestamp;
-		
-		if (stats->rx > prev_stats->rx)
-			stats->speed_rx = (stats->rx - prev_stats->rx) / t;
-		if (stats->tx > prev_stats->tx)
-			stats->speed_tx = (stats->tx - prev_stats->tx) / t;
-	}
-	*prev_stats = *stats;
-}
-
-/*
  * Calculate disk usage percentage.
  */
 static void
@@ -435,17 +413,16 @@ calc_disks_usage(struct disk_stats *disks, int n_disks)
 /*
  * Print stats to stdout.
  */
-static void
+[[maybe_unused]] static void
 print_stats(const struct cpu_stats *cpu_stats, const struct memory_stats *memory_stats,
-	    const struct network_stats *network_stats, float uptime,
+	    float uptime,
 	    const struct disk_stats *disks, int n_disks)
 {
 	int i;
-	
-	printf("UP %.2f\tCPU %.2f\tMEM %.2f|%.2f\tNET %lu|%lu\n",
+
+	printf("UP %.2f\tCPU %.2f\tMEM %.2f|%.2f\n",
 	       uptime, cpu_stats->load_pct, memory_stats->mem_pct,
-	       memory_stats->swap_pct, network_stats->speed_rx,
-	       network_stats->speed_tx);
+	       memory_stats->swap_pct);
 
 	puts("Disks");
 	for (i = 0; i < n_disks; ++i)

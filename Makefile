@@ -1,2 +1,2 @@
 hmon: hmon.c
-	$(CC) -Wall -Werror -g -o hmon hmon.c
+	$(CC) -Wall -Wextra -Werror -g -o hmon hmon.c
