@@ -20,11 +20,22 @@ struct net_stats {
 	uint64_t tx_bytes;
 };
 
+/*
+ * All values in kB.
+ */
+struct mem_stats {
+	uint64_t total;
+	uint64_t used;
+	uint64_t swap_total;
+	uint64_t swap_used;
+};
+
 static int get_cpu_ticks(struct cpu_ticks *out);
 static void calc_cpu_usage(const struct cpu_ticks *prev, const struct cpu_ticks *curr, float *cpu_pct, float *iowait_pct);
 static int get_total_net_stats(struct net_stats *out);
+static int get_mem_stats(struct mem_stats *out);
 
-#define TIME_SEC 3
+#define TIME_SEC 15
 
 int
 main(void)
@@ -33,6 +44,7 @@ main(void)
 	float cpu_pct, iowait_pct;
 	struct net_stats prev_net = {0}, curr_net = {0};
 	uint64_t rx_speed, tx_speed;
+	struct mem_stats mem;
 
 	for (;;) {
 		get_cpu_ticks(&curr_cpu);
@@ -44,12 +56,17 @@ main(void)
 		tx_speed = curr_net.tx_bytes > prev_net.tx_bytes ? (curr_net.tx_bytes - prev_net.tx_bytes) / TIME_SEC : 0;
 		prev_net = curr_net;
 
+		get_mem_stats(&mem);
+
 		printf("CPU: load %.2f%%, iowait %.2f%%\n",
 		       cpu_pct,
 		       iowait_pct);
 		printf("NET: rx speed %lu B/s, tx speed %lu B/s\n",
 		       rx_speed,
 		       tx_speed);
+		printf("MEM: used %lu kB, swap used %lu kB\n",
+			mem.used,
+			mem.swap_used);
 		puts("");
 
 		usleep(TIME_SEC * 1000000);
@@ -158,6 +175,41 @@ get_total_net_stats(struct net_stats *out)
 		out->rx_bytes += rx;
 		out->tx_bytes += tx;
 	}
+
+	fclose(fp);
+	return 0;
+}
+
+/*
+ * Get memory counters by reading /proc/meminfo.
+ */
+static int
+get_mem_stats(struct mem_stats *out)
+{
+	char line[128];
+	FILE *fp;
+	uint64_t mem_total, mem_avail, swap_total, swap_free;
+
+	memset(out, 0, sizeof(*out));
+
+	if (!(fp = fopen("/proc/meminfo", "r")))
+		return -1;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (sscanf(line, "MemTotal: %lu", &mem_total) == 1)
+			continue;
+		if (sscanf(line, "MemAvailable: %lu", &mem_avail) == 1)
+			continue;
+		if (sscanf(line, "SwapTotal: %lu", &swap_total) == 1)
+			continue;
+		if (sscanf(line, "SwapFree: %lu", &swap_free) == 1)
+			continue;
+	}
+
+	out->total = mem_total;
+	out->used = mem_total > mem_avail ? mem_total - mem_avail : 0;
+	out->swap_total = swap_total;
+	out->swap_used = swap_total > swap_free ? swap_total - swap_free : 0;
 
 	fclose(fp);
 	return 0;
