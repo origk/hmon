@@ -41,6 +41,8 @@ main(void)
 
 /*
  * Reads the overal CPU counters from the first line of /proc/stat.
+ *
+ * TODO: iowait is unreliable, will need a better way.
  */
 static int
 get_cpu_ticks(struct cpu_ticks *out)
